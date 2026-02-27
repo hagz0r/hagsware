@@ -1,0 +1,8 @@
+CompileFlags:
+  Add:
+    - -xc++
+    - --target=x86_64-w64-mingw32
+    - -IC:\Users\hagz0r\scoop\apps\gcc\current\include\c++\13.2.0
+    - -IC:\Users\hagz0r\scoop\apps\gcc\current\include\c++\13.2.0\x86_64-w64-mingw32
+    - -IC:\Users\hagz0r\scoop\apps\gcc\current\include\c++\13.2.0\backward
+    - -IC:\Users\hagz0r\scoop\apps\gcc\current\include
