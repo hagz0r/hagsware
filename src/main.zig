@@ -1,30 +1,30 @@
 const std = @import("std");
-const win = @cImport({
-    @cInclude("windows.h");
-    @cInclude("processthreadsapi.h");
-    @cInclude("tlhelp32.h");
-});
-const hagsware = @import("hagsware");
+const win = std.os.windows;
+const DLL_PROCESS_ATTACH: win.DWORD = 1;
 
-pub fn main() !void {
-    const pid = get_pid_from_name("cs2.exe");
-    std.log.debug("Process ID: {}", .{pid});
+fn bootstrap(lp_param: win.LPVOID) callconv(.winapi) win.DWORD {
+    std.debug.print("Bootstrap thread created: {}\n", .{lp_param});
+    return 0;
 }
 
-pub fn get_pid_from_name(target_process_name: []const u8) win.PROCESSENTRY32W {
-    const snapshot = win.CreateToolhelp32Snapshot(win.TH32CS_SNAPPROCESS, 0);
-    defer win.CloseHandle(snapshot);
+pub export fn self_test() callconv(.winapi) u32 {
+    return 0xDEADBEEF;
+}
 
-    var process_entry: win.PROCESSENTRY32W = undefined;
-    process_entry.dwSize = @sizeOf(win.PROCESSENTRY32W);
+pub fn DllMain(
+    hinst_dll: win.HINSTANCE,
+    fdw_reason: win.DWORD,
+    lpv_reserved: win.LPVOID,
+) callconv(.winapi) win.BOOL {
+    _ = hinst_dll;
+    _ = lpv_reserved;
 
-    if (win.Process32First(snapshot, &process_entry)) {
-        while (win.Process32Next(snapshot, &process_entry)) {
-            const process_name = std.mem.span(process_entry.szExeFile);
-            if (std.mem.eql(u16, process_name, target_process_name)) {
-                std.log.debug("Found process ID: {}", .{process_entry.th32ProcessID});
-                return process_entry.th32ProcessID;
-            }
+    if (fdw_reason == DLL_PROCESS_ATTACH) {
+        const thread_handle = win.kernel32.CreateThread(null, 0, bootstrap, null, 0, null);
+        if (thread_handle) |handle| {
+            win.CloseHandle(handle);
         }
     }
+
+    return win.TRUE;
 }

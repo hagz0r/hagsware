@@ -4,7 +4,10 @@
     .fingerprint = 0x7f42315aa03576ac, // Changing this has security and trust implications.
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
-        
+        .zigwin32 = .{
+            .url = "git+https://github.com/marlersoft/zigwin32#26f3ccffb5630dfe23fcda1f00d75d46147b5a60",
+            .hash = "zigwin32-25.0.28-preview-AAAAAIMW5QN6mjC6PSZmBowvhalmYcMRnztDdKvJXAUz",
+        },
     },
 
     .paths = .{

@@ -3,12 +3,14 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
     const mod = b.addModule("hagsware", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
 
-    const exe = b.addExecutable(.{
+    const dll = b.addLibrary(.{
+        .linkage = .dynamic,
         .name = "hagsware",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -19,20 +21,23 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    exe.linkLibC();
 
-    b.installArtifact(exe);
+    b.installArtifact(dll);
 
-    const run_step = b.step("run", "Run the app");
+    const loader = b.addExecutable(.{
+        .name = "hagsware_loader",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/loader.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(loader);
 
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
-
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    const loader_run_step = b.step("loader-run", "Run DLL self_test via loader");
+    const loader_run_cmd = b.addRunArtifact(loader);
+    loader_run_cmd.step.dependOn(b.getInstallStep());
+    loader_run_step.dependOn(&loader_run_cmd.step);
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
@@ -40,14 +45,13 @@ pub fn build(b: *std.Build) void {
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+    const dll_tests = b.addTest(.{
+        .root_module = dll.root_module,
     });
-    exe_tests.linkLibC();
 
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+    const run_dll_tests = b.addRunArtifact(dll_tests);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_dll_tests.step);
 }
