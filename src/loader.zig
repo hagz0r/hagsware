@@ -1,17 +1,19 @@
 const std = @import("std");
-const win = std.os.windows;
+const win32 = @import("win32");
+const foundation = win32.foundation;
+const library_loader = win32.system.library_loader;
+const w = win32.zig;
 
 const SelfTestFn = *const fn () callconv(.winapi) u32;
 
 pub fn main() !void {
-    const dll_path = std.unicode.utf8ToUtf16LeStringLiteral("zig-out\\bin\\hagsware.dll");
-    const module = win.LoadLibraryW(dll_path) catch |err| {
-        std.log.err("LoadLibraryW failed: {s}", .{@errorName(err)});
+    const module = library_loader.LoadLibraryW(w.L("zig-out\\bin\\hagsware.dll")) orelse {
+        std.log.err("LoadLibraryW failed: {f}", .{foundation.GetLastError()});
         return error.DllLoadFailed;
     };
-    defer win.FreeLibrary(module);
+    defer _ = library_loader.FreeLibrary(module);
 
-    const proc = win.kernel32.GetProcAddress(module, "self_test") orelse {
+    const proc = library_loader.GetProcAddress(module, "self_test") orelse {
         std.log.err("GetProcAddress(self_test) failed", .{});
         return error.SymbolNotFound;
     };

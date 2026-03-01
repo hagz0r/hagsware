@@ -3,10 +3,15 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const zigwin32 = b.dependency("zigwin32", .{});
+    const win32_mod = zigwin32.module("win32");
 
     const mod = b.addModule("hagsware", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "win32", .module = win32_mod },
+        },
     });
 
     const dll = b.addLibrary(.{
@@ -18,6 +23,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "hagsware", .module = mod },
+                .{ .name = "win32", .module = win32_mod },
             },
         }),
     });
@@ -30,6 +36,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/loader.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "win32", .module = win32_mod },
+            },
         }),
     });
     b.installArtifact(loader);
