@@ -1,13 +1,29 @@
 const win32 = @import("win32");
+const std = @import("std");
 const logger = @import("log.zig");
 const foundation = win32.foundation;
 const library_loader = win32.system.library_loader;
 const threading = win32.system.threading;
 const system_services = win32.system.system_services;
+const dumper = @import("dumper/mod.zig");
 const w = win32.zig;
+
+fn print_pos() void {
+    var db = try dumper.Database.init(std.heap.page_allocator);
+    defer db.deinit();
+    const client_base = library_loader.GetModuleHandleA("client.dll");
+    const pawn = try db.offsets.get("client.dll", "dwLocalPlayerPawn");
+    const pos_vec = try db.client.field("C_BasePlayerPawn", "m_vOldOrigin");
+
+    logger.info("Client base: {}", client_base);
+    logger.info("Pawn addr: {}", client_base + pawn);
+    logger.info("Position Vector address : {}", pos_vec);
+}
 
 fn bootstrap(lp_param: ?*anyopaque) callconv(.winapi) u32 {
     logger.info("Bootstrap thread created: {?}", .{lp_param});
+    print_pos();
+
     return 0;
 }
 
