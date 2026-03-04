@@ -11,7 +11,6 @@ pub fn main() !void {
         std.log.err("LoadLibraryW failed: {f}", .{foundation.GetLastError()});
         return error.DllLoadFailed;
     };
-    defer _ = library_loader.FreeLibrary(module);
 
     const proc = library_loader.GetProcAddress(module, "self_test") orelse {
         std.log.err("GetProcAddress(self_test) failed", .{});

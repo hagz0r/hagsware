@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize: std.builtin.OptimizeMode = .ReleaseFast;
     const zigwin32 = b.dependency("zigwin32", .{});
     const win32_mod = zigwin32.module("win32");
 
