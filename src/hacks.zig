@@ -1,6 +1,7 @@
 const std = @import("std");
 const dumper = @import("dumper/mod.zig");
 const AppContext = @import("app_context.zig").AppContext;
+const GameContext = @import("app_context.zig").GameContext;
 const generated = @import("hacks_autogen.zig");
 
 pub const Hack = struct {
@@ -56,8 +57,11 @@ pub const Registry = struct {
     storage: generated.Storage,
     hacks: [generated.hack_count]Hack,
 
-    pub fn init(self: *Registry, db: *dumper.Database) void {
-        self.app = .{ .db = db };
+    pub fn init(self: *Registry, db: *dumper.Database) !void {
+        self.app = .{
+            .db = db,
+            .game = try GameContext.init(),
+        };
         generated.initStorage(&self.storage, &self.app);
 
         inline for (std.meta.fields(generated.Storage), 0..) |field, index| {

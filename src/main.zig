@@ -22,14 +22,17 @@ fn bootstrap(lp_param: ?*anyopaque) callconv(.winapi) u32 {
     defer db.deinit();
 
     var registry: hacks_mod.Registry = undefined;
-    registry.init(&db);
+    registry.init(&db) catch |err| {
+        logger.err("Registry.init failed: {s}", .{@errorName(err)});
+        return 1;
+    };
 
     registry.initAll() catch |err| {
         logger.err("Registry.initAll failed: {s}", .{@errorName(err)});
         return 1;
     };
 
-    while (!kb.GetKeyState(kb.VK_END)) {
+    while (kb.GetKeyState(@as(i32, @intFromEnum(kb.VK_END))) == 0) {
         registry.updateAll() catch |err| {
             logger.err("Registry.updateAll failed: {s}", .{@errorName(err)});
             return 1;
