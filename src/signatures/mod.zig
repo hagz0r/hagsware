@@ -2,8 +2,7 @@ const std = @import("std");
 
 const win32 = @import("win32");
 const library_loader = win32.system.library_loader;
-const dbg = win32.system.diagnostics.debug;
-const sysserv = win32.system.system_services;
+const memory = win32.system.memory;
 
 pub const wildcard: i16 = -1;
 
@@ -60,40 +59,6 @@ fn matchAt(
     return true;
 }
 
-fn findTextSection(base: [*]const u8) ?struct { start: [*]const u8, size: usize } {
-    const base_addr = @intFromPtr(base);
-
-    const dos_header = @as(*const sysserv.IMAGE_DOS_HEADER, @ptrFromInt(base_addr));
-    const nt_headers_addr = std.math.add(
-        usize,
-        base_addr,
-        @as(usize, @intCast(dos_header.e_lfanew)),
-    ) catch return null;
-    const nt_headers = @as(*const dbg.IMAGE_NT_HEADERS64, @ptrFromInt(nt_headers_addr));
-
-    const sections: [*]const dbg.IMAGE_SECTION_HEADER = @as(
-        [*]const dbg.IMAGE_SECTION_HEADER,
-        @ptrFromInt(nt_headers_addr + @sizeOf(dbg.IMAGE_NT_HEADERS64)),
-    );
-
-    var i: usize = 0;
-    while (i < @as(usize, @intCast(nt_headers.FileHeader.NumberOfSections))) : (i += 1) {
-        const sec = sections[i];
-        if (std.mem.eql(u8, sec.Name[0..5], ".text")) {
-            const start_addr = std.math.add(
-                usize,
-                base_addr,
-                @as(usize, @intCast(sec.VirtualAddress)),
-            ) catch return null;
-            const start = @as([*]const u8, @ptrFromInt(start_addr));
-            const size = @as(usize, @intCast(sec.Misc.VirtualSize));
-            return .{ .start = start, .size = size };
-        }
-    }
-
-    return null;
-}
-
 // we would scan module for pattern we found,
 // naive O(n*m) scan for the whole section would be slow
 // so we can scan .text section or all sections with IMAGE_SCN_MEM_EXECUTE flag
@@ -104,20 +69,51 @@ pub fn resolveModule(module: ModuleInfo) ?*u8 {
     const moduleHandle = library_loader.GetModuleHandleA(module.name) orelse
         return null;
 
-    const base = @as([*]const u8, @ptrCast(moduleHandle));
-    const text = findTextSection(base) orelse return null;
-
-    const buffer = text.start[0..text.size];
+    const module_base = @intFromPtr(moduleHandle);
 
     const pattern = signatureToBytes(std.heap.page_allocator, module.signature) catch return null;
     defer std.heap.page_allocator.free(pattern);
 
-    if (scanSimd(buffer, pattern)) |offset| {
-        const resolved_addr = std.math.add(usize, @intFromPtr(text.start), offset) catch return null;
-        return @as(*u8, @ptrFromInt(resolved_addr));
+    var addr = module_base;
+    while (true) {
+        var mbi: memory.MEMORY_BASIC_INFORMATION = undefined;
+        const queried = memory.VirtualQuery(
+            @as(*const anyopaque, @ptrFromInt(addr)),
+            &mbi,
+            @sizeOf(memory.MEMORY_BASIC_INFORMATION),
+        );
+        if (queried == 0) break;
+
+        const region_base = @intFromPtr(mbi.BaseAddress orelse break);
+        const allocation_base = @intFromPtr(mbi.AllocationBase orelse break);
+        const region_size = mbi.RegionSize;
+
+        if (region_base > module_base and allocation_base != module_base) break;
+
+        if (allocation_base == module_base and isReadableRegion(mbi)) {
+            const buffer = @as([*]const u8, @ptrFromInt(region_base))[0..region_size];
+            if (scanSimd(buffer, pattern)) |offset| {
+                const resolved_addr = std.math.add(usize, region_base, offset) catch return null;
+                return @as(*u8, @ptrFromInt(resolved_addr));
+            }
+        }
+
+        addr = std.math.add(usize, region_base, region_size) catch break;
     }
 
     return null;
+}
+
+fn isReadableRegion(mbi: memory.MEMORY_BASIC_INFORMATION) bool {
+    if (mbi.State.COMMIT == 0) return false;
+    if (mbi.Protect.PAGE_NOACCESS == 1 or mbi.Protect.PAGE_GUARD == 1) return false;
+
+    return mbi.Protect.PAGE_READONLY == 1 or
+        mbi.Protect.PAGE_READWRITE == 1 or
+        mbi.Protect.PAGE_WRITECOPY == 1 or
+        mbi.Protect.PAGE_EXECUTE_READ == 1 or
+        mbi.Protect.PAGE_EXECUTE_READWRITE == 1 or
+        mbi.Protect.PAGE_EXECUTE_WRITECOPY == 1;
 }
 
 pub fn resolveModuleRead(comptime T: type, module: ModuleInfo, read_offset: usize) ?T {
