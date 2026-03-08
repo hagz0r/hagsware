@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const win32 = @import("win32");
-const foundation = win32.foundation;
 const library_loader = win32.system.library_loader;
 const dbg = win32.system.diagnostics.debug;
 const sysserv = win32.system.system_services;
@@ -15,66 +14,34 @@ pub const ModuleInfo = struct {
 
 // Parses example pattern: AA BB ?? CC ? DD
 pub fn signatureToBytes(allocator: std.mem.Allocator, pattern: []const u8) ![]i16 {
-    var list = std.ArrayList(i16).init(allocator);
-    errdefer list.deinit();
+    var list: std.ArrayList(i16) = .empty;
+    errdefer list.deinit(allocator);
 
     var it = std.mem.tokenizeScalar(u8, pattern, ' ');
     while (it.next()) |token| {
         if (token.len == 0) continue;
         if (std.mem.eql(u8, token, "?") or std.mem.eql(u8, token, "??")) {
-            try list.append(wildcard);
+            try list.append(allocator, wildcard);
             continue;
         }
 
         const value = try std.fmt.parseInt(u8, token, 16);
-        try list.append(@as(i16, value));
+        try list.append(allocator, @as(i16, value));
     }
 
-    return list.toOwnedSlice();
+    return list.toOwnedSlice(allocator);
 }
+
 pub fn scanSimd(
     buffer: []const u8,
-    pattern: []const i32,
+    pattern: []const i16,
 ) ?usize {
-    var anchor_index: usize = 0;
-    var found_anchor = false;
+    if (pattern.len == 0 or buffer.len < pattern.len) return null;
 
-    for (pattern, 0..) |b, i| {
-        if (b != -1) {
-            anchor_index = i;
-            found_anchor = true;
-            break;
-        }
-    }
-    if (!found_anchor)
-        return null;
-
-    const anchor_byte: u8 = @intCast(pattern[anchor_index]);
-    const Vec = @Vector(32, u8); // AVX2 256-bit
-    const anchor_vec: Vec = @splat(anchor_byte);
-
-    var i: usize = 0;
-
-    while (i + 32 <= buffer.len) : (i += 32) {
-        const chunk: Vec = buffer[i..][0..32].*;
-
-        const cmp = chunk == anchor_vec;
-        const mask = @as(u32, cmp);
-
-        if (mask != 0) {
-            var bit: u32 = mask;
-            while (bit != 0) {
-                const offset = @ctz(bit);
-                const pos = i + offset;
-
-                if (pos + pattern.len > buffer.len)
-                    return null;
-
-                if (matchAt(buffer, pattern, pos))
-                    return pos;
-
-                bit &= bit - 1;
-            }
+    var pos: usize = 0;
+    while (pos + pattern.len <= buffer.len) : (pos += 1) {
+        if (matchAt(buffer, pattern, pos)) {
+            return pos;
         }
     }
 
@@ -83,35 +50,43 @@ pub fn scanSimd(
 
 fn matchAt(
     buffer: []const u8,
-    pattern: []const i32,
+    pattern: []const i16,
     pos: usize,
 ) bool {
     for (pattern, 0..) |p, j| {
-        if (p == -1)
-            continue;
-
-        if (buffer[pos + j] != @as(u8, @intCast(p)))
-            return false;
+        if (p == wildcard) continue;
+        if (buffer[pos + j] != @as(u8, @intCast(p))) return false;
     }
     return true;
 }
 
-fn findTextSection(base: [*]const u8, nt_headers: dbg.IMAGE_NT_HEADERS64) ?struct { start: [*]const u8, size: usize } {
-    const nt = nt_headers;
+fn findTextSection(base: [*]const u8) ?struct { start: [*]const u8, size: usize } {
+    const base_addr = @intFromPtr(base);
+
+    const dos_header = @as(*const sysserv.IMAGE_DOS_HEADER, @ptrFromInt(base_addr));
+    const nt_headers_addr = std.math.add(
+        usize,
+        base_addr,
+        @as(usize, @intCast(dos_header.e_lfanew)),
+    ) catch return null;
+    const nt_headers = @as(*const dbg.IMAGE_NT_HEADERS64, @ptrFromInt(nt_headers_addr));
+
     const sections: [*]const dbg.IMAGE_SECTION_HEADER = @as(
         [*]const dbg.IMAGE_SECTION_HEADER,
-        @ptrCast(@as([*]const u8, @ptrCast(nt)) + @sizeOf(dbg.IMAGE_NT_HEADERS64)),
+        @ptrFromInt(nt_headers_addr + @sizeOf(dbg.IMAGE_NT_HEADERS64)),
     );
 
     var i: usize = 0;
-    while (i < nt.FileHeader.NumberOfSections) : (i += 1) {
+    while (i < @as(usize, @intCast(nt_headers.FileHeader.NumberOfSections))) : (i += 1) {
         const sec = sections[i];
-
-        const name = sec.Name;
-
-        if (std.mem.eql(u8, name[0..5], ".text")) {
-            const start = base + sec.VirtualAddress;
-            const size = sec.Misc.VirtualSize;
+        if (std.mem.eql(u8, sec.Name[0..5], ".text")) {
+            const start_addr = std.math.add(
+                usize,
+                base_addr,
+                @as(usize, @intCast(sec.VirtualAddress)),
+            ) catch return null;
+            const start = @as([*]const u8, @ptrFromInt(start_addr));
+            const size = @as(usize, @intCast(sec.Misc.VirtualSize));
             return .{ .start = start, .size = size };
         }
     }
@@ -130,9 +105,7 @@ pub fn resolveModule(module: ModuleInfo) ?*u8 {
         return null;
 
     const base = @as([*]const u8, @ptrCast(moduleHandle));
-
-    const text = findTextSection(base) orelse
-        return null;
+    const text = findTextSection(base) orelse return null;
 
     const buffer = text.start[0..text.size];
 
@@ -140,8 +113,34 @@ pub fn resolveModule(module: ModuleInfo) ?*u8 {
     defer std.heap.page_allocator.free(pattern);
 
     if (scanSimd(buffer, pattern)) |offset| {
-        return @as(*u8, @ptrCast(text.start + offset));
+        const resolved_addr = std.math.add(usize, @intFromPtr(text.start), offset) catch return null;
+        return @as(*u8, @ptrFromInt(resolved_addr));
     }
 
     return null;
+}
+
+pub fn resolveModuleRead(comptime T: type, module: ModuleInfo, read_offset: usize) ?T {
+    const pattern_addr = resolveModule(module) orelse return null;
+    const value_addr = std.math.add(usize, @intFromPtr(pattern_addr), read_offset) catch return null;
+    return @as(*align(1) const T, @ptrFromInt(value_addr)).*;
+}
+
+pub fn readRelativeAddress(displacement_addr: usize, offset_to_next_instruction: usize) ?usize {
+    const displacement = @as(*align(1) const i32, @ptrFromInt(displacement_addr)).*;
+    const next_instruction_addr = std.math.add(usize, displacement_addr, offset_to_next_instruction) catch return null;
+
+    const next_instruction_signed = std.math.cast(isize, next_instruction_addr) orelse return null;
+    const target_signed = std.math.add(isize, next_instruction_signed, @as(isize, displacement)) catch return null;
+    return std.math.cast(usize, target_signed);
+}
+
+pub fn resolveModuleAbs(
+    module: ModuleInfo,
+    displacement_offset: usize,
+    offset_to_next_instruction: usize,
+) ?usize {
+    const pattern_addr = resolveModule(module) orelse return null;
+    const displacement_addr = std.math.add(usize, @intFromPtr(pattern_addr), displacement_offset) catch return null;
+    return readRelativeAddress(displacement_addr, offset_to_next_instruction);
 }
