@@ -1,3 +1,4 @@
 .claude
 .zig-cache
 zig-out
+src/hacks_autogen.zig
