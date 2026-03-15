@@ -9,6 +9,9 @@ pub const OffsetTable = struct {
     dw_network_game_client: usize,
     dw_network_game_client_max_clients: usize,
     dw_network_game_client_sign_on_state: usize,
+    dw_view_matrix: usize,
+    dw_window_width: usize,
+    dw_window_height: usize,
 
     pub fn init() OffsetTable {
         return .{
@@ -17,6 +20,9 @@ pub const OffsetTable = struct {
             .dw_network_game_client = offsets.engine2_dll.dwNetworkGameClient,
             .dw_network_game_client_max_clients = offsets.engine2_dll.dwNetworkGameClient_maxClients,
             .dw_network_game_client_sign_on_state = offsets.engine2_dll.dwNetworkGameClient_signOnState,
+            .dw_view_matrix = offsets.client_dll.dwViewMatrix,
+            .dw_window_width = offsets.engine2_dll.dwWindowWidth,
+            .dw_window_height = offsets.engine2_dll.dwWindowHeight,
         };
     }
 };
@@ -77,5 +83,8 @@ test "database exposes offset and schema tables" {
     defer db.deinit();
 
     try std.testing.expectEqual(offsets.client_dll.dwEntityList, db.offsets.dw_entity_list);
+    try std.testing.expectEqual(offsets.client_dll.dwViewMatrix, db.offsets.dw_view_matrix);
+    try std.testing.expectEqual(offsets.engine2_dll.dwWindowWidth, db.offsets.dw_window_width);
+    try std.testing.expectEqual(offsets.engine2_dll.dwWindowHeight, db.offsets.dw_window_height);
     try std.testing.expectEqual(client_schema.CGameSceneNode.m_vecAbsOrigin, db.client.m_vec_abs_origin);
 }

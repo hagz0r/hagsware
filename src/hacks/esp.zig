@@ -1,8 +1,11 @@
 const AppContext = @import("../app_context.zig").AppContext;
 const log = @import("../log.zig");
+const render = @import("../render/mod.zig");
 const signatures = @import("../signatures/mod.zig");
 const mem = @import("../utils/memory.zig");
+const Vec2 = @import("../utils/types.zig").Vec2;
 const Vec3 = @import("../utils/types.zig").Vec3;
+const Mat4x4 = [4][4]f32;
 
 const sig_entity_system_pointer = signatures.ModuleInfo{
     .name = "client.dll",
@@ -21,7 +24,7 @@ const entity_identity_handle_offset: usize = 0x10;
 const entity_page_mask: u32 = 0x1FF;
 const entity_index_mask: u32 = 0x7FFF;
 const max_reasonable_clients: i32 = 64;
-const summary_log_interval_ticks: usize = 40;
+const summary_log_interval_ticks: usize = 256;
 
 pub const HackImpl = struct {
     app: *AppContext,
@@ -29,6 +32,9 @@ pub const HackImpl = struct {
     dw_local_player_pawn: usize = 0,
     dw_network_game_client: usize = 0,
     dw_network_game_client_max_clients: usize = 0,
+    dw_view_matrix: usize = 0,
+    dw_window_width: usize = 0,
+    dw_window_height: usize = 0,
 
     m_h_player_pawn: usize = 0,
     m_h_pawn: usize = 0,
@@ -46,6 +52,9 @@ pub const HackImpl = struct {
         self.dw_local_player_pawn = self.app.db.offsets.dw_local_player_pawn;
         self.dw_network_game_client = self.app.db.offsets.dw_network_game_client;
         self.dw_network_game_client_max_clients = self.app.db.offsets.dw_network_game_client_max_clients;
+        self.dw_view_matrix = self.app.db.offsets.dw_view_matrix;
+        self.dw_window_width = self.app.db.offsets.dw_window_width;
+        self.dw_window_height = self.app.db.offsets.dw_window_height;
 
         self.m_h_player_pawn = self.app.db.client.m_h_player_pawn;
         self.m_h_pawn = self.app.db.client.m_h_pawn;
@@ -62,10 +71,27 @@ pub const HackImpl = struct {
     pub fn update(self: *HackImpl) !void {
         self.tick += 1;
         const log_positions = self.tick % summary_log_interval_ticks == 0;
+        render.beginCommands();
+        defer render.endCommands();
 
         const ngc = mem.read(usize, self.app.game.engine2_base + self.dw_network_game_client) orelse return;
         const max_clients = mem.read(i32, ngc + self.dw_network_game_client_max_clients) orelse return;
         if (max_clients <= 0 or max_clients > max_reasonable_clients) return;
+
+        const view_matrix = mem.read(Mat4x4, self.app.game.client_base + self.dw_view_matrix) orelse return;
+        const window_width = mem.read(i32, self.app.game.engine2_base + self.dw_window_width) orelse return;
+        const window_height = mem.read(i32, self.app.game.engine2_base + self.dw_window_height) orelse return;
+        if (window_width <= 0 or window_height <= 0) return;
+        const screen_width: f32 = @floatFromInt(window_width);
+        const screen_height: f32 = @floatFromInt(window_height);
+        render.pushCross(
+            .{
+                .x = screen_width * 0.5,
+                .y = screen_height * 0.5,
+            },
+            5,
+            render.color_debug,
+        );
 
         const entity_list = getEntityList(self) orelse return;
 
@@ -81,6 +107,7 @@ pub const HackImpl = struct {
         var life_ok: usize = 0;
         var team_ok: usize = 0;
         var origin_ok: usize = 0;
+        var screen_ok: usize = 0;
 
         const slot_limit: u32 = @intCast(max_clients);
         var slot: u32 = 1;
@@ -112,23 +139,62 @@ pub const HackImpl = struct {
 
             const origin = getPawnOrigin(self, pawn) orelse continue;
             origin_ok += 1;
+            const screen = worldToScreen(origin, view_matrix, screen_width, screen_height);
+            if (screen != null) screen_ok += 1;
+            const is_enemy = local_team != 0 and team != local_team;
 
             total_players += 1;
-            if (local_team != 0 and team != local_team) enemy_players += 1;
+            if (is_enemy) enemy_players += 1;
+
+            if (screen) |screen_pos| {
+                const head_origin = Vec3{
+                    .x = origin.x,
+                    .y = origin.y,
+                    .z = origin.z + 72.0,
+                };
+                const color = if (is_enemy) render.color_enemy else render.color_friendly;
+
+                if (worldToScreen(head_origin, view_matrix, screen_width, screen_height)) |head_screen| {
+                    const top = @min(head_screen.y, screen_pos.y);
+                    const bottom = @max(head_screen.y, screen_pos.y);
+                    const box_h = bottom - top;
+                    const box_w = box_h * 0.45;
+                    if (box_h > 4.0 and box_w > 2.0) {
+                        render.pushBox(
+                            screen_pos.x - box_w * 0.5,
+                            top,
+                            screen_pos.x + box_w * 0.5,
+                            bottom,
+                            color,
+                        );
+                    } else {
+                        render.pushCross(screen_pos, 3, color);
+                    }
+                } else {
+                    render.pushCross(screen_pos, 3, color);
+                }
+            }
 
             if (log_positions) {
-                log.info(
-                    "ESP player: slot={d}, team={d}, hp={d}, pos=({},{},{})",
-                    .{ slot, team, health, origin.x, origin.y, origin.z },
-                );
+                if (screen) |screen_pos| {
+                    log.info(
+                        "ESP player: slot={d}, team={d}, hp={d}, world=({},{},{}), screen=({},{})",
+                        .{ slot, team, health, origin.x, origin.y, origin.z, screen_pos.x, screen_pos.y },
+                    );
+                } else {
+                    log.info(
+                        "ESP player: slot={d}, team={d}, hp={d}, world=({},{},{}), screen=offscreen",
+                        .{ slot, team, health, origin.x, origin.y, origin.z },
+                    );
+                }
             }
         }
 
         if (log_positions) {
             log.info("ESP players: total={d}, enemies={d}", .{ total_players, enemy_players });
             log.info(
-                "ESP pipeline: ctrl={d}, handle={d}, pawn={d}, hp={d}, life={d}, team={d}, origin={d}",
-                .{ controllers_found, handles_found, pawns_found, health_ok, life_ok, team_ok, origin_ok },
+                "ESP pipeline: ctrl={d}, handle={d}, pawn={d}, hp={d}, life={d}, team={d}, origin={d}, screen={d}",
+                .{ controllers_found, handles_found, pawns_found, health_ok, life_ok, team_ok, origin_ok, screen_ok },
             );
         }
     }
@@ -138,6 +204,35 @@ fn getPawnOrigin(self: *const HackImpl, pawn: usize) ?Vec3 {
     const origin = mem.read(Vec3, pawn + self.m_v_old_origin) orelse return null;
     if (origin.x == 0 and origin.y == 0 and origin.z == 0) return null;
     return origin;
+}
+
+fn worldToScreen(origin: Vec3, matrix: Mat4x4, screen_width: f32, screen_height: f32) ?Vec2 {
+    const clip_x =
+        matrix[0][0] * origin.x +
+        matrix[0][1] * origin.y +
+        matrix[0][2] * origin.z +
+        matrix[0][3];
+    const clip_y =
+        matrix[1][0] * origin.x +
+        matrix[1][1] * origin.y +
+        matrix[1][2] * origin.z +
+        matrix[1][3];
+    const clip_w =
+        matrix[3][0] * origin.x +
+        matrix[3][1] * origin.y +
+        matrix[3][2] * origin.z +
+        matrix[3][3];
+    if (clip_w <= 0.001) return null;
+
+    const inv_w: f32 = 1.0 / clip_w;
+    const ndc_x = clip_x * inv_w;
+    const ndc_y = clip_y * inv_w;
+    if (ndc_x < -1.0 or ndc_x > 1.0 or ndc_y < -1.0 or ndc_y > 1.0) return null;
+
+    return .{
+        .x = (screen_width * 0.5) * (ndc_x + 1.0),
+        .y = (screen_height * 0.5) * (1.0 - ndc_y),
+    };
 }
 
 fn getEntityByHandle(entity_list: usize, handle: u32) ?usize {
