@@ -61,6 +61,7 @@ pub const HackImpl = struct {
 
     pub fn update(self: *HackImpl) !void {
         self.tick += 1;
+        const log_positions = self.tick % summary_log_interval_ticks == 0;
 
         const ngc = mem.read(usize, self.app.game.engine2_base + self.dw_network_game_client) orelse return;
         const max_clients = mem.read(i32, ngc + self.dw_network_game_client_max_clients) orelse return;
@@ -109,14 +110,21 @@ pub const HackImpl = struct {
             if (team < 2 or team > 3) continue;
             team_ok += 1;
 
-            _ = getPawnOrigin(self, pawn) orelse continue;
+            const origin = getPawnOrigin(self, pawn) orelse continue;
             origin_ok += 1;
 
             total_players += 1;
             if (local_team != 0 and team != local_team) enemy_players += 1;
+
+            if (log_positions) {
+                log.info(
+                    "ESP player: slot={d}, team={d}, hp={d}, pos=({},{},{})",
+                    .{ slot, team, health, origin.x, origin.y, origin.z },
+                );
+            }
         }
 
-        if (self.tick % summary_log_interval_ticks == 0) {
+        if (log_positions) {
             log.info("ESP players: total={d}, enemies={d}", .{ total_players, enemy_players });
             log.info(
                 "ESP pipeline: ctrl={d}, handle={d}, pawn={d}, hp={d}, life={d}, team={d}, origin={d}",
