@@ -1,4 +1,4 @@
-# Download/Update JSON offset files from cs2-dumper repository using git sparse-checkout
+# Download/Update Zig offset files from cs2-dumper repository using git sparse-checkout
 param(
     [string]$RepoUrl = "https://github.com/a2x/cs2-dumper.git",
     [string]$SparsePath = "output"
@@ -65,21 +65,21 @@ if ($needsClone) {
 
 Write-Host ""
 
-# Copy JSON files to output directory
+# Copy Zig files to output directory
 $sourcePath = Join-Path $tempRepoPath $SparsePath
-$jsonFiles = Get-ChildItem -Path $sourcePath -Filter "*.json"
+$zigFiles = Get-ChildItem -Path $sourcePath -Filter "*.zig"
 
-if ($jsonFiles.Count -eq 0) {
-    Write-Host "No JSON files found in repository" -ForegroundColor Yellow
+if ($zigFiles.Count -eq 0) {
+    Write-Host "No Zig files found in repository" -ForegroundColor Yellow
     exit 1
 }
 
-Write-Host "Copying $($jsonFiles.Count) JSON file(s)..." -ForegroundColor Cyan
+Write-Host "Copying $($zigFiles.Count) Zig file(s)..." -ForegroundColor Cyan
 
 $successCount = 0
 $failCount = 0
 
-foreach ($file in $jsonFiles) {
+foreach ($file in $zigFiles) {
     $destination = Join-Path $outputPath $file.Name
 
     try {

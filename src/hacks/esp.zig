@@ -43,16 +43,16 @@ pub const HackImpl = struct {
     tick: usize = 0,
 
     pub fn init(self: *HackImpl) !void {
-        self.dw_local_player_pawn = try self.app.db.offsets.get("client.dll", "dwLocalPlayerPawn");
-        self.dw_network_game_client = try self.app.db.offsets.get("engine2.dll", "dwNetworkGameClient");
-        self.dw_network_game_client_max_clients = try self.app.db.offsets.get("engine2.dll", "dwNetworkGameClient_maxClients");
+        self.dw_local_player_pawn = self.app.db.offsets.dw_local_player_pawn;
+        self.dw_network_game_client = self.app.db.offsets.dw_network_game_client;
+        self.dw_network_game_client_max_clients = self.app.db.offsets.dw_network_game_client_max_clients;
 
-        self.m_h_player_pawn = try self.app.db.client.field("CCSPlayerController", "m_hPlayerPawn");
-        self.m_h_pawn = try self.app.db.client.field("CBasePlayerController", "m_hPawn");
-        self.m_i_health = try self.app.db.client.field("C_BaseEntity", "m_iHealth");
-        self.m_i_team_num = try self.app.db.client.field("C_BaseEntity", "m_iTeamNum");
-        self.m_life_state = try self.app.db.client.field("C_BaseEntity", "m_lifeState");
-        self.m_v_old_origin = try self.app.db.client.field("C_BasePlayerPawn", "m_vOldOrigin");
+        self.m_h_player_pawn = self.app.db.client.m_h_player_pawn;
+        self.m_h_pawn = self.app.db.client.m_h_pawn;
+        self.m_i_health = self.app.db.client.m_i_health;
+        self.m_i_team_num = self.app.db.client.m_i_team_num;
+        self.m_life_state = self.app.db.client.m_life_state;
+        self.m_v_old_origin = self.app.db.client.m_v_old_origin;
 
         try resolvePatterns(self);
 
@@ -94,6 +94,7 @@ pub const HackImpl = struct {
 
             const pawn = getEntityByHandle(entity_list, pawn_handle) orelse continue;
             pawns_found += 1;
+
             if (pawn == local_pawn) continue;
 
             const health = mem.read(i32, pawn + self.m_i_health) orelse continue;

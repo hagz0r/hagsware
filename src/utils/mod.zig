@@ -14,10 +14,10 @@ var last_scene_loaded = false;
 var scene_probe_count: usize = 0;
 
 pub fn isSceneLoaded(registry: hacks_mod.Registry) !bool {
-    const dw_ngc = try registry.app.db.offsets.get("engine2.dll", "dwNetworkGameClient");
-    const off_signon = try registry.app.db.offsets.get("engine2.dll", "dwNetworkGameClient_signOnState");
-    const off_max_clients = try registry.app.db.offsets.get("engine2.dll", "dwNetworkGameClient_maxClients");
-    const dw_local_pawn = try registry.app.db.offsets.get("client.dll", "dwLocalPlayerPawn");
+    const dw_ngc = registry.app.db.offsets.dw_network_game_client;
+    const off_signon = registry.app.db.offsets.dw_network_game_client_sign_on_state;
+    const off_max_clients = registry.app.db.offsets.dw_network_game_client_max_clients;
+    const dw_local_pawn = registry.app.db.offsets.dw_local_player_pawn;
 
     const ngc = mem.read(usize, registry.app.game.engine2_base + dw_ngc) orelse 0;
     var sign_on_state: i32 = -1;

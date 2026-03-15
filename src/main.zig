@@ -18,7 +18,7 @@ var self_module: ?foundation.HINSTANCE = null;
 fn bootstrap(lp_param: ?*anyopaque) callconv(.winapi) u32 {
     logger.info("Bootstrap thread created: {?}", .{lp_param});
 
-    var db = dumper.Database.init(std.heap.page_allocator) catch |err| {
+    var db = dumper.Database.init() catch |err| {
         logger.err("Database.init failed: {s}", .{@errorName(err)});
         return 1;
     };
