@@ -5,9 +5,10 @@ const log = @import("../log.zig");
 const render = @import("../render/mod.zig");
 const signatures = @import("../signatures/mod.zig");
 const mem = @import("../utils/memory.zig");
-const Vec2 = @import("../utils/types.zig").Vec2;
+const entity_list = @import("../game/entity_list.zig");
+const projection = @import("../math/projection.zig");
+const player = @import("../game/player.zig");
 const Vec3 = @import("../utils/types.zig").Vec3;
-const Mat4x4 = [4][4]f32;
 
 const sig_entity_system_pointer = signatures.ModuleInfo{
     .name = "client.dll",
@@ -18,13 +19,6 @@ const sig_entity_list_offset = signatures.ModuleInfo{
     .signature = "48 8D ? ? E8 ? ? ? ? 8D 85",
 };
 
-const entity_list_chunk_start: usize = 0x0;
-const entity_list_chunk_stride: usize = 0x8;
-const entity_identity_stride: usize = 0x70;
-const entity_identity_entity_offset: usize = 0x0;
-const entity_identity_handle_offset: usize = 0x10;
-const entity_page_mask: u32 = 0x1FF;
-const entity_index_mask: u32 = 0x7FFF;
 const max_reasonable_clients: i32 = 64;
 const max_cached_players: usize = max_reasonable_clients;
 const max_cache_age_ns: i128 = 200_000_000;
@@ -40,20 +34,6 @@ const CachedPlayer = struct {
 pub const HackImpl = struct {
     app: *AppContext,
 
-    dw_local_player_pawn: usize = 0,
-    dw_network_game_client: usize = 0,
-    dw_network_game_client_max_clients: usize = 0,
-    dw_view_matrix: usize = 0,
-    dw_window_width: usize = 0,
-    dw_window_height: usize = 0,
-
-    m_h_player_pawn: usize = 0,
-    m_h_pawn: usize = 0,
-    m_i_health: usize = 0,
-    m_i_team_num: usize = 0,
-    m_life_state: usize = 0,
-    m_v_old_origin: usize = 0,
-
     entity_system_pointer_addr: usize = 0,
     entity_list_offset: usize = 0,
 
@@ -65,20 +45,6 @@ pub const HackImpl = struct {
     cache_timestamp_ns: i128 = 0,
 
     pub fn init(self: *HackImpl) !void {
-        self.dw_local_player_pawn = self.app.db.offsets.dw_local_player_pawn;
-        self.dw_network_game_client = self.app.db.offsets.dw_network_game_client;
-        self.dw_network_game_client_max_clients = self.app.db.offsets.dw_network_game_client_max_clients;
-        self.dw_view_matrix = self.app.db.offsets.dw_view_matrix;
-        self.dw_window_width = self.app.db.offsets.dw_window_width;
-        self.dw_window_height = self.app.db.offsets.dw_window_height;
-
-        self.m_h_player_pawn = self.app.db.client.m_h_player_pawn;
-        self.m_h_pawn = self.app.db.client.m_h_pawn;
-        self.m_i_health = self.app.db.client.m_i_health;
-        self.m_i_team_num = self.app.db.client.m_i_team_num;
-        self.m_life_state = self.app.db.client.m_life_state;
-        self.m_v_old_origin = self.app.db.client.m_v_old_origin;
-
         try resolvePatterns(self);
 
         active_instance = self;
@@ -95,11 +61,11 @@ pub const HackImpl = struct {
             return;
         }
 
-        const ngc = mem.read(usize, self.app.game.engine2_base + self.dw_network_game_client) orelse {
+        const ngc = player.readNetworkGameClient(self.app) orelse {
             clearCache(self);
             return;
         };
-        const max_clients = mem.read(i32, ngc + self.dw_network_game_client_max_clients) orelse {
+        const max_clients = player.readMaxClients(self.app, ngc) orelse {
             clearCache(self);
             return;
         };
@@ -108,13 +74,14 @@ pub const HackImpl = struct {
             return;
         }
 
-        const entity_list = getEntityList(self) orelse {
+        const entity_list_ptr = getEntityList(self) orelse {
             clearCache(self);
             return;
         };
 
-        const local_pawn = mem.read(usize, self.app.game.client_base + self.dw_local_player_pawn) orelse 0;
-        const local_team: u8 = if (local_pawn != 0) (mem.read(u8, local_pawn + self.m_i_team_num) orelse 0) else 0;
+        const schema = &self.app.db.client;
+        const local_pawn = player.readLocalPawn(self.app);
+        const local_team = player.readTeamAtPawn(local_pawn, schema);
 
         var next_players: [max_cached_players]CachedPlayer = undefined;
         var next_count: usize = 0;
@@ -132,32 +99,30 @@ pub const HackImpl = struct {
         const slot_limit: u32 = @intCast(max_clients);
         var slot: u32 = 1;
         while (slot <= slot_limit) : (slot += 1) {
-            const controller = getEntityByIndex(entity_list, slot) orelse continue;
+            const controller = entity_list.getEntityByIndex(entity_list_ptr, slot) orelse continue;
             controllers_found += 1;
 
-            var pawn_handle = mem.read(u32, controller + self.m_h_player_pawn) orelse 0;
-            if (pawn_handle == 0) pawn_handle = mem.read(u32, controller + self.m_h_pawn) orelse 0;
-            if (pawn_handle == 0) continue;
+            const pawn_handle = player.readPawnHandle(controller, schema) orelse continue;
             handles_found += 1;
 
-            const pawn = getEntityByHandle(entity_list, pawn_handle) orelse continue;
+            const pawn = entity_list.getEntityByHandle(entity_list_ptr, pawn_handle) orelse continue;
             pawns_found += 1;
 
             if (pawn == local_pawn) continue;
 
-            const health = mem.read(i32, pawn + self.m_i_health) orelse continue;
+            const health = mem.read(i32, pawn + schema.m_i_health) orelse continue;
             if (health <= 0 or health > 100) continue;
             health_ok += 1;
 
-            const life_state = mem.read(u8, pawn + self.m_life_state) orelse continue;
+            const life_state = mem.read(u8, pawn + schema.m_life_state) orelse continue;
             if (life_state != 0) continue;
             life_ok += 1;
 
-            const team = mem.read(u8, pawn + self.m_i_team_num) orelse continue;
+            const team = mem.read(u8, pawn + schema.m_i_team_num) orelse continue;
             if (team < 2 or team > 3) continue;
             team_ok += 1;
 
-            const origin = getPawnOrigin(self, pawn) orelse continue;
+            const origin = player.readPawnOrigin(pawn, schema) orelse continue;
             origin_ok += 1;
 
             if (next_count < max_cached_players) {
@@ -209,18 +174,14 @@ pub const HackImpl = struct {
 
         if (!cfg.enabled) return;
 
-        const view_matrix = mem.read(Mat4x4, self.app.game.client_base + self.dw_view_matrix) orelse return;
-        const window_width = mem.read(i32, self.app.game.engine2_base + self.dw_window_width) orelse return;
-        const window_height = mem.read(i32, self.app.game.engine2_base + self.dw_window_height) orelse return;
-        if (window_width <= 0 or window_height <= 0) return;
-        const screen_width: f32 = @floatFromInt(window_width);
-        const screen_height: f32 = @floatFromInt(window_height);
+        const view_matrix = player.readViewMatrix(self.app) orelse return;
+        const window = player.readWindowSize(self.app) orelse return;
 
         if (cfg.draw_center_cross) {
             render.pushCross(
                 .{
-                    .x = screen_width * 0.5,
-                    .y = screen_height * 0.5,
+                    .x = window.width * 0.5,
+                    .y = window.height * 0.5,
                 },
                 5,
                 cfg.debug_color,
@@ -246,37 +207,37 @@ pub const HackImpl = struct {
 
         var i: usize = 0;
         while (i < snapshot_count) : (i += 1) {
-            const player = snapshot[i];
-            const screen = worldToScreen(player.origin, view_matrix, screen_width, screen_height) orelse continue;
+            const cached = snapshot[i];
+            const feet_screen = projection.worldToScreen(cached.origin, view_matrix, window.width, window.height) orelse continue;
 
             const head_origin = Vec3{
-                .x = player.origin.x,
-                .y = player.origin.y,
-                .z = player.origin.z + 72.0,
+                .x = cached.origin.x,
+                .y = cached.origin.y,
+                .z = cached.origin.z + 72.0,
             };
-            const head_screen = worldToScreen(head_origin, view_matrix, screen_width, screen_height) orelse {
-                const color_fallback = if (local_team != 0 and player.team != local_team) cfg.enemy_color else cfg.friendly_color;
-                render.pushCross(screen, 3, color_fallback);
+            const head_screen = projection.worldToScreen(head_origin, view_matrix, window.width, window.height) orelse {
+                const color_fallback = if (local_team != 0 and cached.team != local_team) cfg.enemy_color else cfg.friendly_color;
+                render.pushCross(feet_screen, 3, color_fallback);
                 continue;
             };
 
-            const color = if (local_team != 0 and player.team != local_team) cfg.enemy_color else cfg.friendly_color;
-            const top = @min(head_screen.y, screen.y);
-            const bottom = @max(head_screen.y, screen.y);
+            const color = if (local_team != 0 and cached.team != local_team) cfg.enemy_color else cfg.friendly_color;
+            const top = @min(head_screen.y, feet_screen.y);
+            const bottom = @max(head_screen.y, feet_screen.y);
             const box_h = bottom - top;
             const box_w = box_h * 0.45;
 
             if (cfg.draw_box and box_h > 4.0 and box_w > 2.0) {
                 render.pushBox(
-                    screen.x - box_w * 0.5,
+                    feet_screen.x - box_w * 0.5,
                     top,
-                    screen.x + box_w * 0.5,
+                    feet_screen.x + box_w * 0.5,
                     bottom,
                     cfg.box_thickness,
                     color,
                 );
             } else {
-                render.pushCross(screen, 3, color);
+                render.pushCross(feet_screen, 3, color);
             }
         }
     }
@@ -295,71 +256,6 @@ fn clearCache(self: *HackImpl) void {
     self.cached_local_team = 0;
     self.cache_timestamp_ns = 0;
     self.cache_mutex.unlock();
-}
-
-fn getPawnOrigin(self: *const HackImpl, pawn: usize) ?Vec3 {
-    const origin = mem.read(Vec3, pawn + self.m_v_old_origin) orelse return null;
-    if (origin.x == 0 and origin.y == 0 and origin.z == 0) return null;
-    return origin;
-}
-
-fn worldToScreen(origin: Vec3, matrix: Mat4x4, screen_width: f32, screen_height: f32) ?Vec2 {
-    const clip_x =
-        matrix[0][0] * origin.x +
-        matrix[0][1] * origin.y +
-        matrix[0][2] * origin.z +
-        matrix[0][3];
-    const clip_y =
-        matrix[1][0] * origin.x +
-        matrix[1][1] * origin.y +
-        matrix[1][2] * origin.z +
-        matrix[1][3];
-    const clip_w =
-        matrix[3][0] * origin.x +
-        matrix[3][1] * origin.y +
-        matrix[3][2] * origin.z +
-        matrix[3][3];
-    if (clip_w <= 0.001) return null;
-
-    const inv_w: f32 = 1.0 / clip_w;
-    const ndc_x = clip_x * inv_w;
-    const ndc_y = clip_y * inv_w;
-    if (ndc_x < -1.0 or ndc_x > 1.0 or ndc_y < -1.0 or ndc_y > 1.0) return null;
-
-    return .{
-        .x = (screen_width * 0.5) * (ndc_x + 1.0),
-        .y = (screen_height * 0.5) * (1.0 - ndc_y),
-    };
-}
-
-fn getEntityByHandle(entity_list: usize, handle: u32) ?usize {
-    const index = handle & entity_index_mask;
-    if (index == 0) return null;
-
-    const identity = getEntityIdentity(entity_list, index) orelse return null;
-    const identity_handle = mem.read(u32, identity + entity_identity_handle_offset) orelse return null;
-    if (identity_handle != handle) return null;
-
-    const entity = mem.read(usize, identity + entity_identity_entity_offset) orelse return null;
-    if (entity == 0) return null;
-    return entity;
-}
-
-fn getEntityByIndex(entity_list: usize, index: u32) ?usize {
-    const identity = getEntityIdentity(entity_list, index) orelse return null;
-    const entity = mem.read(usize, identity + entity_identity_entity_offset) orelse return null;
-    if (entity == 0) return null;
-    return entity;
-}
-
-fn getEntityIdentity(entity_list: usize, index: u32) ?usize {
-    const chunk_index = index >> 9;
-    const chunk_addr = entity_list + entity_list_chunk_start + entity_list_chunk_stride * chunk_index;
-    const chunk = mem.read(usize, chunk_addr) orelse return null;
-    if (chunk == 0) return null;
-
-    const entity_index_in_page = index & entity_page_mask;
-    return chunk + entity_identity_stride * entity_index_in_page;
 }
 
 fn getEntityList(self: *const HackImpl) ?usize {
