@@ -43,6 +43,7 @@ pub fn build(b: *std.Build) void {
     dll.step.dependOn(&run_gen_hacks.step);
 
     b.installArtifact(dll);
+    b.installBinFile("hagsware.toml", "hagsware.toml");
 
     const loader = b.addExecutable(.{
         .name = "hagsware_loader",

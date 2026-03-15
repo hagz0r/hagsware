@@ -23,6 +23,7 @@ const PresentFn = *const fn (
     sync_interval: u32,
     flags: u32,
 ) callconv(.winapi) foundation.HRESULT;
+pub const FrameCallback = *const fn () void;
 
 const CommandKind = enum {
     cross,
@@ -40,6 +41,7 @@ const DrawCommand = union(CommandKind) {
         top: f32,
         right: f32,
         bottom: f32,
+        thickness: i32,
         color: u32,
     },
 };
@@ -60,6 +62,8 @@ var hook_attempt_counter: usize = 0;
 var original_present: ?PresentFn = null;
 var present_slot: ?*PresentFn = null;
 var hook_mutex: std.Thread.Mutex = .{};
+var callback_mutex: std.Thread.Mutex = .{};
+var frame_callback: ?FrameCallback = null;
 
 pub fn ensureInternalPresentHook() void {
     if (shutdown_requested.load(.acquire)) return;
@@ -78,6 +82,7 @@ pub fn ensureInternalPresentHook() void {
 
 pub fn shutdown() void {
     shutdown_requested.store(true, .release);
+    setFrameCallback(null);
     _ = uninstallPresentHook();
 
     var i: usize = 0;
@@ -92,6 +97,12 @@ pub fn shutdown() void {
     build_mutex.lock();
     defer build_mutex.unlock();
     build_count = 0;
+}
+
+pub fn setFrameCallback(callback: ?FrameCallback) void {
+    callback_mutex.lock();
+    defer callback_mutex.unlock();
+    frame_callback = callback;
 }
 
 pub fn beginCommands() void {
@@ -119,7 +130,7 @@ pub fn pushCross(pos: Vec2, radius: i32, color: u32) void {
     build_count += 1;
 }
 
-pub fn pushBox(left: f32, top: f32, right: f32, bottom: f32, color: u32) void {
+pub fn pushBox(left: f32, top: f32, right: f32, bottom: f32, thickness: i32, color: u32) void {
     if (build_count >= max_commands) return;
     build_commands[build_count] = .{
         .box = .{
@@ -127,6 +138,7 @@ pub fn pushBox(left: f32, top: f32, right: f32, bottom: f32, color: u32) void {
             .top = top,
             .right = right,
             .bottom = bottom,
+            .thickness = thickness,
             .color = color,
         },
     };
@@ -285,6 +297,10 @@ fn hkPresent(self: *const dxgi.IDXGISwapChain, sync_interval: u32, flags: u32) c
 
     const original = original_present orelse return 0;
     if (!shutdown_requested.load(.acquire)) {
+        callback_mutex.lock();
+        const callback = frame_callback;
+        callback_mutex.unlock();
+        if (callback) |cb| cb();
         drawQueued(self);
     }
     return original(self, sync_interval, flags);
@@ -338,7 +354,7 @@ fn drawQueued(swap_chain: *const dxgi.IDXGISwapChain) void {
     while (i < snapshot_count) : (i += 1) {
         switch (snapshot[i]) {
             .cross => |cross| drawCross(context1, target_view, width, height, cross.pos, cross.radius, cross.color),
-            .box => |box| drawBox(context1, target_view, width, height, box.left, box.top, box.right, box.bottom, box.color),
+            .box => |box| drawBox(context1, target_view, width, height, box.left, box.top, box.right, box.bottom, box.thickness, box.color),
         }
     }
 
@@ -372,6 +388,7 @@ fn drawBox(
     top: f32,
     right: f32,
     bottom: f32,
+    thickness: i32,
     color: u32,
 ) void {
     var l: i32 = @intFromFloat(@round(left));
@@ -390,10 +407,14 @@ fn drawBox(
         b = tmp;
     }
 
-    clearRect(context1, target_view, width, height, l, t, r + 1, t + 1, color);
-    clearRect(context1, target_view, width, height, l, b, r + 1, b + 1, color);
-    clearRect(context1, target_view, width, height, l, t, l + 1, b + 1, color);
-    clearRect(context1, target_view, width, height, r, t, r + 1, b + 1, color);
+    const line_thickness = std.math.clamp(thickness, 1, 8);
+    var i: i32 = 0;
+    while (i < line_thickness) : (i += 1) {
+        clearRect(context1, target_view, width, height, l - i, t - i, r + i + 1, t - i + 1, color);
+        clearRect(context1, target_view, width, height, l - i, b + i, r + i + 1, b + i + 1, color);
+        clearRect(context1, target_view, width, height, l - i, t - i, l - i + 1, b + i + 1, color);
+        clearRect(context1, target_view, width, height, r + i, t - i, r + i + 1, b + i + 1, color);
+    }
 }
 
 fn clearRect(

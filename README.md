@@ -26,6 +26,30 @@ zig build
 
 If the build succeeds, inject .dll file with your favorite injector and test it in game.
 
+## Config (TOML)
+
+`hagsware.toml` is installed next to `hagsware.dll` by `zig build`.
+
+Example:
+
+```toml
+[esp]
+enabled = true
+draw_box = true
+box_thickness = 2
+draw_center_cross = true
+draw_name = false
+draw_weapon = false
+enemy_color = "FF4040"
+friendly_color = "40C0FF"
+debug_color = "FFFFFF"
+```
+
+Notes:
+- Colors are `RRGGBB` hex strings.
+- Config is hot-reloaded once per second (on file change).
+- `draw_name` and `draw_weapon` are parsed from config, but text rendering is not implemented yet in the current internal renderer.
+
 
 ## How to test
 

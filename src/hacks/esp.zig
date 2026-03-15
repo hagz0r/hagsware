@@ -1,4 +1,6 @@
+const std = @import("std");
 const AppContext = @import("../app_context.zig").AppContext;
+const config = @import("../config.zig");
 const log = @import("../log.zig");
 const render = @import("../render/mod.zig");
 const signatures = @import("../signatures/mod.zig");
@@ -24,7 +26,16 @@ const entity_identity_handle_offset: usize = 0x10;
 const entity_page_mask: u32 = 0x1FF;
 const entity_index_mask: u32 = 0x7FFF;
 const max_reasonable_clients: i32 = 64;
+const max_cached_players: usize = max_reasonable_clients;
+const max_cache_age_ns: i128 = 200_000_000;
 const summary_log_interval_ticks: usize = 256;
+
+const CachedPlayer = struct {
+    slot: u32,
+    team: u8,
+    health: i32,
+    origin: Vec3,
+};
 
 pub const HackImpl = struct {
     app: *AppContext,
@@ -47,6 +58,11 @@ pub const HackImpl = struct {
     entity_list_offset: usize = 0,
 
     tick: usize = 0,
+    cache_mutex: std.Thread.Mutex = .{},
+    cached_players: [max_cached_players]CachedPlayer = undefined,
+    cached_count: usize = 0,
+    cached_local_team: u8 = 0,
+    cache_timestamp_ns: i128 = 0,
 
     pub fn init(self: *HackImpl) !void {
         self.dw_local_player_pawn = self.app.db.offsets.dw_local_player_pawn;
@@ -65,38 +81,43 @@ pub const HackImpl = struct {
 
         try resolvePatterns(self);
 
+        active_instance = self;
+        render.setFrameCallback(frameCallback);
         log.info("ESP init done", .{});
     }
 
     pub fn update(self: *HackImpl) !void {
         self.tick += 1;
         const log_positions = self.tick % summary_log_interval_ticks == 0;
-        render.beginCommands();
-        defer render.endCommands();
+        const cfg = config.get().esp;
+        if (!cfg.enabled) {
+            clearCache(self);
+            return;
+        }
 
-        const ngc = mem.read(usize, self.app.game.engine2_base + self.dw_network_game_client) orelse return;
-        const max_clients = mem.read(i32, ngc + self.dw_network_game_client_max_clients) orelse return;
-        if (max_clients <= 0 or max_clients > max_reasonable_clients) return;
+        const ngc = mem.read(usize, self.app.game.engine2_base + self.dw_network_game_client) orelse {
+            clearCache(self);
+            return;
+        };
+        const max_clients = mem.read(i32, ngc + self.dw_network_game_client_max_clients) orelse {
+            clearCache(self);
+            return;
+        };
+        if (max_clients <= 0 or max_clients > max_reasonable_clients) {
+            clearCache(self);
+            return;
+        }
 
-        const view_matrix = mem.read(Mat4x4, self.app.game.client_base + self.dw_view_matrix) orelse return;
-        const window_width = mem.read(i32, self.app.game.engine2_base + self.dw_window_width) orelse return;
-        const window_height = mem.read(i32, self.app.game.engine2_base + self.dw_window_height) orelse return;
-        if (window_width <= 0 or window_height <= 0) return;
-        const screen_width: f32 = @floatFromInt(window_width);
-        const screen_height: f32 = @floatFromInt(window_height);
-        render.pushCross(
-            .{
-                .x = screen_width * 0.5,
-                .y = screen_height * 0.5,
-            },
-            5,
-            render.color_debug,
-        );
-
-        const entity_list = getEntityList(self) orelse return;
+        const entity_list = getEntityList(self) orelse {
+            clearCache(self);
+            return;
+        };
 
         const local_pawn = mem.read(usize, self.app.game.client_base + self.dw_local_player_pawn) orelse 0;
         const local_team: u8 = if (local_pawn != 0) (mem.read(u8, local_pawn + self.m_i_team_num) orelse 0) else 0;
+
+        var next_players: [max_cached_players]CachedPlayer = undefined;
+        var next_count: usize = 0;
 
         var total_players: usize = 0;
         var enemy_players: usize = 0;
@@ -107,7 +128,6 @@ pub const HackImpl = struct {
         var life_ok: usize = 0;
         var team_ok: usize = 0;
         var origin_ok: usize = 0;
-        var screen_ok: usize = 0;
 
         const slot_limit: u32 = @intCast(max_clients);
         var slot: u32 = 1;
@@ -139,66 +159,143 @@ pub const HackImpl = struct {
 
             const origin = getPawnOrigin(self, pawn) orelse continue;
             origin_ok += 1;
-            const screen = worldToScreen(origin, view_matrix, screen_width, screen_height);
-            if (screen != null) screen_ok += 1;
-            const is_enemy = local_team != 0 and team != local_team;
 
+            if (next_count < max_cached_players) {
+                next_players[next_count] = .{
+                    .slot = slot,
+                    .team = team,
+                    .health = health,
+                    .origin = origin,
+                };
+                next_count += 1;
+            }
+
+            const is_enemy = local_team != 0 and team != local_team;
             total_players += 1;
             if (is_enemy) enemy_players += 1;
 
-            if (screen) |screen_pos| {
-                const head_origin = Vec3{
-                    .x = origin.x,
-                    .y = origin.y,
-                    .z = origin.z + 72.0,
-                };
-                const color = if (is_enemy) render.color_enemy else render.color_friendly;
-
-                if (worldToScreen(head_origin, view_matrix, screen_width, screen_height)) |head_screen| {
-                    const top = @min(head_screen.y, screen_pos.y);
-                    const bottom = @max(head_screen.y, screen_pos.y);
-                    const box_h = bottom - top;
-                    const box_w = box_h * 0.45;
-                    if (box_h > 4.0 and box_w > 2.0) {
-                        render.pushBox(
-                            screen_pos.x - box_w * 0.5,
-                            top,
-                            screen_pos.x + box_w * 0.5,
-                            bottom,
-                            color,
-                        );
-                    } else {
-                        render.pushCross(screen_pos, 3, color);
-                    }
-                } else {
-                    render.pushCross(screen_pos, 3, color);
-                }
-            }
-
             if (log_positions) {
-                if (screen) |screen_pos| {
-                    log.info(
-                        "ESP player: slot={d}, team={d}, hp={d}, world=({},{},{}), screen=({},{})",
-                        .{ slot, team, health, origin.x, origin.y, origin.z, screen_pos.x, screen_pos.y },
-                    );
-                } else {
-                    log.info(
-                        "ESP player: slot={d}, team={d}, hp={d}, world=({},{},{}), screen=offscreen",
-                        .{ slot, team, health, origin.x, origin.y, origin.z },
-                    );
-                }
+                log.info(
+                    "ESP player: slot={d}, team={d}, hp={d}, world=({},{},{})",
+                    .{ slot, team, health, origin.x, origin.y, origin.z },
+                );
             }
         }
+
+        self.cache_mutex.lock();
+        self.cached_count = next_count;
+        self.cached_local_team = local_team;
+        self.cache_timestamp_ns = std.time.nanoTimestamp();
+        if (next_count > 0) {
+            std.mem.copyForwards(CachedPlayer, self.cached_players[0..next_count], next_players[0..next_count]);
+        }
+        self.cache_mutex.unlock();
 
         if (log_positions) {
             log.info("ESP players: total={d}, enemies={d}", .{ total_players, enemy_players });
             log.info(
-                "ESP pipeline: ctrl={d}, handle={d}, pawn={d}, hp={d}, life={d}, team={d}, origin={d}, screen={d}",
-                .{ controllers_found, handles_found, pawns_found, health_ok, life_ok, team_ok, origin_ok, screen_ok },
+                "ESP pipeline: ctrl={d}, handle={d}, pawn={d}, hp={d}, life={d}, team={d}, origin={d}",
+                .{ controllers_found, handles_found, pawns_found, health_ok, life_ok, team_ok, origin_ok },
             );
         }
     }
+
+    fn renderFrame(self: *HackImpl) void {
+        const cfg = config.get().esp;
+        config.warnTextSettingsIfNeeded();
+
+        render.beginCommands();
+        defer render.endCommands();
+
+        if (!cfg.enabled) return;
+
+        const view_matrix = mem.read(Mat4x4, self.app.game.client_base + self.dw_view_matrix) orelse return;
+        const window_width = mem.read(i32, self.app.game.engine2_base + self.dw_window_width) orelse return;
+        const window_height = mem.read(i32, self.app.game.engine2_base + self.dw_window_height) orelse return;
+        if (window_width <= 0 or window_height <= 0) return;
+        const screen_width: f32 = @floatFromInt(window_width);
+        const screen_height: f32 = @floatFromInt(window_height);
+
+        if (cfg.draw_center_cross) {
+            render.pushCross(
+                .{
+                    .x = screen_width * 0.5,
+                    .y = screen_height * 0.5,
+                },
+                5,
+                cfg.debug_color,
+            );
+        }
+
+        var snapshot: [max_cached_players]CachedPlayer = undefined;
+        var snapshot_count: usize = 0;
+        var local_team: u8 = 0;
+        var cache_timestamp_ns: i128 = 0;
+
+        self.cache_mutex.lock();
+        snapshot_count = self.cached_count;
+        local_team = self.cached_local_team;
+        cache_timestamp_ns = self.cache_timestamp_ns;
+        if (snapshot_count > 0) {
+            std.mem.copyForwards(CachedPlayer, snapshot[0..snapshot_count], self.cached_players[0..snapshot_count]);
+        }
+        self.cache_mutex.unlock();
+
+        const now_ns = std.time.nanoTimestamp();
+        if (cache_timestamp_ns == 0 or now_ns - cache_timestamp_ns > max_cache_age_ns) return;
+
+        var i: usize = 0;
+        while (i < snapshot_count) : (i += 1) {
+            const player = snapshot[i];
+            const screen = worldToScreen(player.origin, view_matrix, screen_width, screen_height) orelse continue;
+
+            const head_origin = Vec3{
+                .x = player.origin.x,
+                .y = player.origin.y,
+                .z = player.origin.z + 72.0,
+            };
+            const head_screen = worldToScreen(head_origin, view_matrix, screen_width, screen_height) orelse {
+                const color_fallback = if (local_team != 0 and player.team != local_team) cfg.enemy_color else cfg.friendly_color;
+                render.pushCross(screen, 3, color_fallback);
+                continue;
+            };
+
+            const color = if (local_team != 0 and player.team != local_team) cfg.enemy_color else cfg.friendly_color;
+            const top = @min(head_screen.y, screen.y);
+            const bottom = @max(head_screen.y, screen.y);
+            const box_h = bottom - top;
+            const box_w = box_h * 0.45;
+
+            if (cfg.draw_box and box_h > 4.0 and box_w > 2.0) {
+                render.pushBox(
+                    screen.x - box_w * 0.5,
+                    top,
+                    screen.x + box_w * 0.5,
+                    bottom,
+                    cfg.box_thickness,
+                    color,
+                );
+            } else {
+                render.pushCross(screen, 3, color);
+            }
+        }
+    }
 };
+
+var active_instance: ?*HackImpl = null;
+
+fn frameCallback() void {
+    const self = active_instance orelse return;
+    self.renderFrame();
+}
+
+fn clearCache(self: *HackImpl) void {
+    self.cache_mutex.lock();
+    self.cached_count = 0;
+    self.cached_local_team = 0;
+    self.cache_timestamp_ns = 0;
+    self.cache_mutex.unlock();
+}
 
 fn getPawnOrigin(self: *const HackImpl, pawn: usize) ?Vec3 {
     const origin = mem.read(Vec3, pawn + self.m_v_old_origin) orelse return null;

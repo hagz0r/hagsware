@@ -1,0 +1,13 @@
+# hagsware config
+# Colors are RRGGBB hex strings.
+
+[esp]
+enabled = true
+draw_box = true
+box_thickness = 5
+draw_center_cross = true
+draw_name = true
+draw_weapon = true
+enemy_color = "FF0000"
+friendly_color = "0000FF"
+debug_color = "FFFFFF"
