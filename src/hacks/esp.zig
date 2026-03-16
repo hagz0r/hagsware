@@ -3,21 +3,12 @@ const AppContext = @import("../app_context.zig").AppContext;
 const config = @import("../config.zig");
 const log = @import("../log.zig");
 const render = @import("../render/mod.zig");
-const signatures = @import("../signatures/mod.zig");
 const mem = @import("../utils/memory.zig");
+const entity_system = @import("../game/entity_system.zig");
 const entity_list = @import("../game/entity_list.zig");
 const projection = @import("../math/projection.zig");
 const player = @import("../game/player.zig");
 const Vec3 = @import("../utils/types.zig").Vec3;
-
-const sig_entity_system_pointer = signatures.ModuleInfo{
-    .name = "client.dll",
-    .signature = "48 89 ? ? ? ? ? 4C 63 ? ? ? ? ? 44 3B ? ? ? ? ? 0F",
-};
-const sig_entity_list_offset = signatures.ModuleInfo{
-    .name = "client.dll",
-    .signature = "48 8D ? ? E8 ? ? ? ? 8D 85",
-};
 
 const max_reasonable_clients: i32 = 64;
 const max_cached_players: usize = max_reasonable_clients;
@@ -34,9 +25,6 @@ const CachedPlayer = struct {
 pub const HackImpl = struct {
     app: *AppContext,
 
-    entity_system_pointer_addr: usize = 0,
-    entity_list_offset: usize = 0,
-
     tick: usize = 0,
     cache_mutex: std.Thread.Mutex = .{},
     cached_players: [max_cached_players]CachedPlayer = undefined,
@@ -45,7 +33,7 @@ pub const HackImpl = struct {
     cache_timestamp_ns: i128 = 0,
 
     pub fn init(self: *HackImpl) !void {
-        try resolvePatterns(self);
+        try entity_system.init();
 
         active_instance = self;
         render.setFrameCallback(frameCallback);
@@ -74,7 +62,7 @@ pub const HackImpl = struct {
             return;
         }
 
-        const entity_list_ptr = getEntityList(self) orelse {
+        const entity_list_ptr = entity_system.getEntityList() orelse {
             clearCache(self);
             return;
         };
@@ -256,44 +244,4 @@ fn clearCache(self: *HackImpl) void {
     self.cached_local_team = 0;
     self.cache_timestamp_ns = 0;
     self.cache_mutex.unlock();
-}
-
-fn getEntityList(self: *const HackImpl) ?usize {
-    if (self.entity_system_pointer_addr == 0 or self.entity_list_offset == 0) return null;
-
-    const entity_system = mem.read(usize, self.entity_system_pointer_addr) orelse return null;
-    if (entity_system == 0) return null;
-
-    return entity_system + self.entity_list_offset;
-}
-
-fn resolvePatterns(self: *HackImpl) !void {
-    const entity_system_pattern = signatures.resolveModule(sig_entity_system_pointer) orelse {
-        return error.EntitySystemPointerPatternNotFound;
-    };
-    const entity_system_disp_addr = @intFromPtr(entity_system_pattern) + 3;
-    self.entity_system_pointer_addr = signatures.readRelativeAddress(entity_system_disp_addr, 4) orelse {
-        return error.EntitySystemPointerResolveFailed;
-    };
-
-    self.entity_list_offset = resolveEntityListOffset() orelse {
-        return error.EntityListOffsetPatternNotFound;
-    };
-
-    log.info(
-        "ESP signatures ready: ent_sys_pat=0x{x}, ent_sys_ptr=0x{x}, ent_list_off=0x{x}",
-        .{
-            @intFromPtr(entity_system_pattern),
-            self.entity_system_pointer_addr,
-            self.entity_list_offset,
-        },
-    );
-}
-
-fn resolveEntityListOffset() ?usize {
-    if (signatures.resolveModuleRead(i8, sig_entity_list_offset, 3)) |offset8| {
-        if (offset8 > 0) return @as(usize, @intCast(offset8));
-    }
-
-    return null;
 }
